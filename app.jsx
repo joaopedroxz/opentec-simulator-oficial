@@ -124,10 +124,16 @@ const FULL_250_QUESTIONS = window.FULL_250_QUESTIONS;
 
         let correctCount = 0;
         const total = currentExam.questions.length;
+        const domainResults = {};
 
         currentExam.questions.forEach(q => {
+          const domain = q.domain || "Geral";
+          if (!domainResults[domain]) domainResults[domain] = { correct: 0, total: 0 };
+          domainResults[domain].total++;
+
           if (isAnswerCorrect(currentExam.userAnswers[q.id], q.answer)) {
             correctCount++;
+            domainResults[domain].correct++;
           }
         });
 
@@ -139,6 +145,7 @@ const FULL_250_QUESTIONS = window.FULL_250_QUESTIONS;
           correctCount,
           total,
           passed,
+          domainResults,
           timeSpentSec: (90 * 60) - currentExam.timeLeft,
           date: new Date().toLocaleDateString('pt-BR')
         };
@@ -207,6 +214,18 @@ const FULL_250_QUESTIONS = window.FULL_250_QUESTIONS;
         const set = new Set(questions.map(q => q.domain || "Geral"));
         return Array.from(set);
       }, [questions]);
+
+      const domainStats = useMemo(() => {
+        const stats = {};
+        history.forEach(exam => {
+          Object.entries(exam.domainResults || {}).forEach(([domain, result]) => {
+            if (!stats[domain]) stats[domain] = { correct: 0, total: 0 };
+            stats[domain].correct += Number(result.correct) || 0;
+            stats[domain].total += Number(result.total) || 0;
+          });
+        });
+        return stats;
+      }, [history]);
 
       const filteredPracticeQuestions = useMemo(() => {
         if (selectedDomainFilter === 'ALL') return questions;
@@ -328,6 +347,32 @@ const FULL_250_QUESTIONS = window.FULL_250_QUESTIONS;
                     </div>
                     <div className="text-xs text-slate-400 mt-2">Nota de corte: ≥ 70%</div>
                   </div>
+                </div>
+
+                <div className="bg-slate-800/80 border border-slate-700 rounded-xl p-6 shadow-md">
+                  <h3 className="text-lg font-bold text-white mb-4">Desempenho por Domínio do Exame</h3>
+                  {Object.keys(domainStats).length === 0 ? (
+                    <p className="text-slate-400 text-sm">{history.length > 0 ? 'Os simulados do histórico foram feitos antes da coleta de dados por domínio. Conclua um novo simulado para começar a ver seu desempenho.' : 'Conclua um simulado para ver seu desempenho em cada domínio.'}</p>
+                  ) : (
+                    <div className="space-y-4">
+                      {domains.map(domain => {
+                        const stat = domainStats[domain];
+                        const percentage = stat?.total ? Math.round((stat.correct / stat.total) * 100) : null;
+                        return (
+                          <div key={domain} className="space-y-1">
+                            <div className="flex justify-between gap-4 text-xs font-semibold text-slate-300">
+                              <span>{domain}</span>
+                              <span>{percentage === null ? 'Sem dados' : `${percentage}% (${stat.correct}/${stat.total})`}</span>
+                            </div>
+                            <div className="w-full bg-slate-900 h-2 rounded-full overflow-hidden" aria-label={percentage === null ? `${domain}: sem dados` : `${domain}: ${percentage}% de acertos`}>
+                              <div className={`h-2 rounded-full transition-all ${percentage === null ? 'bg-slate-700' : percentage < 70 ? 'bg-companyRed' : 'bg-snGreen'}`} style={{ width: `${percentage ?? 0}%` }} />
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                  <p className="text-slate-500 text-xs mt-4">Média acumulada dos simulados concluídos. O histórico anterior à atualização não contém respostas por domínio.</p>
                 </div>
 
                 <div className="bg-slate-800/80 border border-slate-700 rounded-xl p-6 shadow-md">
@@ -1023,5 +1068,4 @@ const FULL_250_QUESTIONS = window.FULL_250_QUESTIONS;
     }
 
 
-const root = ReactDOM.createRoot(document.getElementById('root'));
-root.render(<App />);
+ReactDOM.render(<App />, document.getElementById('root'));
