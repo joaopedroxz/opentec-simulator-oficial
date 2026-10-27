@@ -1,5 +1,8 @@
 const { useState, useEffect, useMemo, useCallback, useRef } = React;
 const FULL_250_QUESTIONS = window.FULL_250_QUESTIONS;
+const escapeHtml = (value) => String(value ?? '').replace(/[&<>"']/g, character => ({
+  '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+}[character]));
 
     const shuffleArray = (array) => {
       const newArray = [...array];
@@ -95,6 +98,9 @@ const FULL_250_QUESTIONS = window.FULL_250_QUESTIONS;
 
       const [activeTab, setActiveTab] = useState('dashboard');
       const [examState, setExamState] = useState(null);
+      const [selectedHistoryExam, setSelectedHistoryExam] = useState(null);
+      const [theme, setTheme] = useState(() => localStorage.getItem('sn_csa_theme') || 'green');
+      const [highContrast, setHighContrast] = useState(() => localStorage.getItem('sn_csa_high_contrast') === 'true');
       
       const [practiceIndex, setPracticeIndex] = useState(0);
       const [practiceAnswers, setPracticeAnswers] = useState({});
@@ -103,8 +109,7 @@ const FULL_250_QUESTIONS = window.FULL_250_QUESTIONS;
       const [selectedDomainFilter, setSelectedDomainFilter] = useState('ALL');
       
       const [modalConfig, setModalConfig] = useState(null);
-      // NOVO: Estado para filtrar apenas erros na revisão do simulado
-      const [showOnlyErrors, setShowOnlyErrors] = useState(false);
+      const [reviewFilter, setReviewFilter] = useState('all');
 
       const [history, setHistory] = useState(() => {
         const saved = localStorage.getItem('sn_csa_history');
@@ -119,8 +124,16 @@ const FULL_250_QUESTIONS = window.FULL_250_QUESTIONS;
         localStorage.setItem('sn_csa_history', JSON.stringify(history));
       }, [history]);
 
+      useEffect(() => {
+        document.body.dataset.theme = theme;
+        document.body.dataset.contrast = highContrast ? 'high' : 'normal';
+        localStorage.setItem('sn_csa_theme', theme);
+        localStorage.setItem('sn_csa_high_contrast', String(highContrast));
+      }, [theme, highContrast]);
+
       const finishExam = useCallback((currentExam) => {
         if (!currentExam || currentExam.isFinished) return currentExam;
+        setReviewFilter('all');
 
         let correctCount = 0;
         const total = currentExam.questions.length;
@@ -146,6 +159,18 @@ const FULL_250_QUESTIONS = window.FULL_250_QUESTIONS;
           total,
           passed,
           domainResults,
+          questionReview: currentExam.questions.map((q, index) => ({
+            number: index + 1,
+            id: q.id,
+            domain: q.domain || 'Geral',
+            question: q.question,
+            options: q.options,
+            correctAnswer: q.answer,
+            userAnswer: currentExam.userAnswers[q.id] ?? null,
+            isCorrect: isAnswerCorrect(currentExam.userAnswers[q.id], q.answer),
+            flaggedForReview: Boolean(currentExam.flags[q.id]),
+            explanation: q.explanation || ''
+          })),
           timeSpentSec: (90 * 60) - currentExam.timeLeft,
           date: new Date().toLocaleDateString('pt-BR')
         };
@@ -158,6 +183,95 @@ const FULL_250_QUESTIONS = window.FULL_250_QUESTIONS;
           result
         };
       }, []);
+
+      const getExamReport = () => ({
+        application: 'Opentec Simulator - ServiceNow CSA',
+        generatedAt: new Date().toISOString(),
+        result: {
+          date: examState.result.date,
+          scorePercent: examState.result.scorePercent,
+          correctCount: examState.result.correctCount,
+          incorrectCount: examState.result.total - examState.result.correctCount,
+          total: examState.result.total,
+          passed: examState.result.passed,
+          timeSpentSec: examState.result.timeSpentSec,
+          domainResults: examState.result.domainResults || {}
+        },
+        questions: examState.questions.map((question, index) => {
+          const selected = examState.userAnswers[question.id];
+          const selectedIndexes = selected === undefined ? [] : Array.isArray(selected) ? selected : [selected];
+          const correctIndexes = Array.isArray(question.answer) ? question.answer : [question.answer];
+          return {
+            number: index + 1,
+            id: question.id,
+            domain: question.domain || 'Geral',
+            question: question.question,
+            options: question.options,
+            selectedAnswers: selectedIndexes.map(optionIndex => ({ letter: String.fromCharCode(65 + optionIndex), text: question.options[optionIndex] })),
+            correctAnswers: correctIndexes.map(optionIndex => ({ letter: String.fromCharCode(65 + optionIndex), text: question.options[optionIndex] })),
+            isCorrect: isAnswerCorrect(selected, question.answer),
+            flaggedForReview: Boolean(examState.flags[question.id]),
+            explanation: question.explanation || ''
+          };
+        })
+      });
+
+      const downloadExamReportJson = () => {
+        const report = getExamReport();
+        const blob = new Blob([JSON.stringify(report, null, 2)], { type: 'application/json;charset=utf-8' });
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement('a');
+        link.href = url;
+        link.download = `relatorio-simulado-csa-${new Date().toISOString().slice(0, 10)}.json`;
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+        setTimeout(() => URL.revokeObjectURL(url), 1000);
+      };
+
+      const printExamReport = () => {
+        const reportWindow = window.open('', '_blank');
+        if (!reportWindow) {
+          setModalConfig({
+            isOpen: true,
+            title: 'Não foi possível abrir o relatório',
+            children: 'O navegador bloqueou a nova janela. Permita pop-ups para este site e tente exportar o PDF novamente.',
+            cancelText: 'Fechar'
+          });
+          return;
+        }
+
+        const report = getExamReport();
+        const result = report.result;
+        const questionCards = report.questions.map(item => {
+          const selectedText = item.selectedAnswers.length
+            ? item.selectedAnswers.map(answer => `${answer.letter}) ${escapeHtml(answer.text)}`).join(', ')
+            : 'Não respondida';
+          const correctText = item.correctAnswers.map(answer => `${answer.letter}) ${escapeHtml(answer.text)}`).join(', ');
+          return `<article class="question ${item.isCorrect ? 'correct' : 'incorrect'}">
+            <div class="meta">Questão ${item.number} · ${escapeHtml(item.domain)} · ${item.isCorrect ? 'Acertou' : 'Errou'}${item.flaggedForReview ? ' · Marcada para revisão' : ''}</div>
+            <h2>${escapeHtml(item.question)}</h2>
+            <p><strong>Sua resposta:</strong> ${selectedText}</p>
+            <p><strong>Resposta correta:</strong> ${correctText}</p>
+            ${item.explanation ? `<p class="explanation"><strong>Explicação:</strong> ${escapeHtml(item.explanation)}</p>` : ''}
+          </article>`;
+        }).join('');
+        const domainRows = Object.entries(result.domainResults).map(([domain, stat]) =>
+          `<tr><td>${escapeHtml(domain)}</td><td>${stat.correct} / ${stat.total}</td><td>${stat.total ? Math.round(stat.correct / stat.total * 100) : 0}%</td></tr>`
+        ).join('');
+        const html = `<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><title>Relatório do Simulado CSA</title>
+          <style>
+            body{font:14px Arial,sans-serif;color:#17202a;margin:32px;line-height:1.45}h1{margin:0 0 8px;color:#123b31}h2{font-size:16px;margin:8px 0}p{margin:5px 0}.summary{padding:16px;background:#f1f5f4;border-radius:8px;margin:18px 0}.summary-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}.question{padding:14px;margin:12px 0;border:1px solid #cbd5e1;border-left:5px solid #dc2626;border-radius:6px;break-inside:avoid}.question.correct{border-left-color:#16825d}.meta{font-size:12px;color:#475569;font-weight:bold}.explanation{margin-top:8px;padding:8px;background:#f8fafc}table{border-collapse:collapse;width:100%;margin:10px 0 20px}th,td{text-align:left;padding:7px;border-bottom:1px solid #cbd5e1}@media print{body{margin:16mm}.question{break-inside:avoid}button{display:none}}
+          </style></head><body>
+          <h1>Relatório do Simulado ServiceNow CSA</h1><p>Concluído em ${escapeHtml(result.date)} · Gerado em ${escapeHtml(new Date(report.generatedAt).toLocaleString('pt-BR'))}</p>
+          <section class="summary"><div class="summary-grid"><div><strong>Resultado</strong><br>${result.passed ? 'Aprovado' : 'Reprovado'}</div><div><strong>Pontuação</strong><br>${result.scorePercent}% (${result.correctCount}/${result.total})</div><div><strong>Tempo</strong><br>${Math.floor(result.timeSpentSec / 60)} min ${result.timeSpentSec % 60} s</div></div></section>
+          <h2>Desempenho por domínio</h2><table><thead><tr><th>Domínio</th><th>Acertos</th><th>Percentual</th></tr></thead><tbody>${domainRows}</tbody></table>
+          <h2>Revisão detalhada</h2>${questionCards}
+          <script>window.onload=function(){window.focus();window.print();};<\/script></body></html>`;
+        reportWindow.document.open();
+        reportWindow.document.write(html);
+        reportWindow.document.close();
+      };
 
       // Cronômetro
       useEffect(() => {
@@ -192,7 +306,7 @@ const FULL_250_QUESTIONS = window.FULL_250_QUESTIONS;
           isFinished: false,
           result: null
         });
-        setShowOnlyErrors(false);
+        setReviewFilter('all');
         setActiveTab('exam');
       };
 
@@ -300,6 +414,29 @@ const FULL_250_QUESTIONS = window.FULL_250_QUESTIONS;
                 <Icons.Upload /> Banco
               </button>
             </nav>
+            <div className="flex items-center gap-2 shrink-0">
+              <label className="sr-only" htmlFor="theme-select">Tema de cores</label>
+              <select
+                id="theme-select"
+                value={theme}
+                onChange={e => setTheme(e.target.value)}
+                aria-label="Tema de cores"
+                className="bg-slate-900 border border-slate-700 text-slate-200 text-xs rounded-lg px-2.5 py-2 focus:outline-none focus:border-snGreen"
+              >
+                <option value="green">Verde</option>
+                <option value="ocean">Oceano</option>
+                <option value="violet">Violeta</option>
+                <option value="amber">Âmbar</option>
+              </select>
+              <button
+                type="button"
+                aria-pressed={highContrast}
+                onClick={() => setHighContrast(value => !value)}
+                className={`px-2.5 py-2 text-xs font-bold rounded-lg border transition ${highContrast ? 'bg-snGreen/20 border-snGreen text-snGreen' : 'bg-slate-900 border-slate-700 text-slate-300 hover:text-white'}`}
+              >
+                {highContrast ? 'Alto contraste: ligado' : 'Alto contraste'}
+              </button>
+            </div>
           </header>
 
           <main className="flex-1 p-4 md:p-6 max-w-7xl w-full mx-auto">
@@ -395,7 +532,8 @@ const FULL_250_QUESTIONS = window.FULL_250_QUESTIONS;
                             <th className="p-3">Tempo</th>
                             <th className="p-3">Acertos</th>
                             <th className="p-3">Pontuação</th>
-                            <th className="p-3 rounded-tr-lg">Status</th>
+                            <th className="p-3">Status</th>
+                            <th className="p-3 rounded-tr-lg">Respostas</th>
                           </tr>
                         </thead>
                         <tbody className="divide-y divide-slate-700">
@@ -410,6 +548,15 @@ const FULL_250_QUESTIONS = window.FULL_250_QUESTIONS;
                                   <span className="px-2.5 py-1 bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 rounded-full text-xs font-bold">APROVADO</span>
                                 ) : (
                                   <span className="px-2.5 py-1 bg-rose-500/20 text-rose-400 border border-rose-500/30 rounded-full text-xs font-bold">REPROVADO</span>
+                                )}
+                              </td>
+                              <td className="p-3">
+                                {item.questionReview?.length ? (
+                                  <button onClick={() => setSelectedHistoryExam(item)} className="px-2.5 py-1.5 rounded-lg bg-slate-700 hover:bg-slate-600 text-white text-xs font-bold transition">
+                                    Visualizar
+                                  </button>
+                                ) : (
+                                  <span className="text-xs text-slate-500" title="As respostas não foram salvas para este simulado antigo">Indisponível</span>
                                 )}
                               </td>
                             </tr>
@@ -538,25 +685,48 @@ const FULL_250_QUESTIONS = window.FULL_250_QUESTIONS;
                           </div>
                         </div>
 
+                        <div className="flex flex-wrap justify-center gap-3">
+                          <button onClick={downloadExamReportJson} className="px-4 py-2.5 bg-slate-700 hover:bg-slate-600 border border-slate-600 text-white text-xs font-bold rounded-lg transition">
+                            Baixar relatório JSON
+                          </button>
+                          <button onClick={printExamReport} className="px-4 py-2.5 bg-snGreen hover:bg-emerald-400 text-slate-950 text-xs font-bold rounded-lg transition">
+                            Imprimir / Salvar como PDF
+                          </button>
+                        </div>
+
                         <div className="text-left space-y-4 pt-4">
                           <div className="flex items-center justify-between">
                             <h3 className="font-bold text-white text-lg">Revisão Detalhada:</h3>
-                            <button 
-                              onClick={() => setShowOnlyErrors(!showOnlyErrors)} 
-                              className={`flex items-center gap-1.5 text-xs font-bold px-3 py-1.5 rounded-lg border transition ${showOnlyErrors ? 'bg-rose-500/20 border-rose-500/40 text-rose-300' : 'bg-slate-700 border-slate-600 text-slate-300'}`}
-                            >
-                              <Icons.Filter /> {showOnlyErrors ? "Mostrando apenas Erros" : "Ocultar Acertos"}
-                            </button>
+                            <div className="flex flex-wrap gap-2">
+                              {[
+                                { id: 'all', label: 'Todas', count: examState.questions.length },
+                                { id: 'errors', label: 'Apenas Erros', count: examState.questions.filter(q => !isAnswerCorrect(examState.userAnswers[q.id], q.answer)).length },
+                                { id: 'flagged', label: 'Marcadas', count: examState.questions.filter(q => examState.flags[q.id]).length, icon: true }
+                              ].map(filter => (
+                                <button
+                                  key={filter.id}
+                                  onClick={() => setReviewFilter(filter.id)}
+                                  className={`flex items-center gap-1.5 text-xs font-bold px-3 py-1.5 rounded-lg border transition ${reviewFilter === filter.id ? 'bg-snGreen/20 border-snGreen/50 text-snGreen' : 'bg-slate-700 border-slate-600 text-slate-300 hover:text-white'}`}
+                                >
+                                  {filter.icon && <Icons.Flag />} {filter.label} ({filter.count})
+                                </button>
+                              ))}
+                            </div>
                           </div>
                           
                           <div className="space-y-4 max-h-[500px] overflow-y-auto custom-scrollbar pr-2">
-                            {examState.questions.map((q, idx) => {
+                            {reviewFilter === 'flagged' && !examState.questions.some(q => examState.flags[q.id]) ? (
+                              <p className="text-slate-400 text-sm italic py-4">Nenhuma questão foi marcada para revisão durante este simulado.</p>
+                            ) : reviewFilter === 'errors' && examState.questions.every(q => isAnswerCorrect(examState.userAnswers[q.id], q.answer)) ? (
+                              <p className="text-slate-400 text-sm italic py-4">Nenhuma questão incorreta neste simulado.</p>
+                            ) : examState.questions.map((q, idx) => {
                               const userAns = examState.userAnswers[q.id];
                               const isCorrect = isAnswerCorrect(userAns, q.answer);
                               const isMulti = Array.isArray(q.answer);
                               const isFlagged = examState.flags[q.id];
                               
-                              if (showOnlyErrors && isCorrect) return null;
+                              if (reviewFilter === 'errors' && isCorrect) return null;
+                              if (reviewFilter === 'flagged' && !isFlagged) return null;
 
                               return (
                                 <div key={q.id} className={`p-4 rounded-xl border ${isCorrect ? 'bg-emerald-950/20 border-emerald-800/40' : 'bg-rose-950/20 border-rose-800/40'}`}>
@@ -910,6 +1080,66 @@ const FULL_250_QUESTIONS = window.FULL_250_QUESTIONS;
           </footer>
 
           <Modal {...modalConfig} isOpen={!!modalConfig?.isOpen} onClose={() => setModalConfig(null)} />
+          {selectedHistoryExam && <ExamHistoryModal exam={selectedHistoryExam} onClose={() => setSelectedHistoryExam(null)} />}
+        </div>
+      );
+    }
+
+    function ExamHistoryModal({ exam, onClose }) {
+      return (
+        <div className="fixed inset-0 z-50 bg-slate-950/90 backdrop-blur-sm flex items-center justify-center p-3 sm:p-6" role="dialog" aria-modal="true" aria-labelledby="history-exam-title">
+          <div className="bg-slate-800 border border-slate-700 rounded-2xl w-full max-w-4xl max-h-[92vh] flex flex-col shadow-2xl">
+            <div className="flex items-center justify-between gap-4 p-5 border-b border-slate-700">
+              <div>
+                <h2 id="history-exam-title" className="text-lg font-bold text-white">Revisão do simulado de {exam.date}</h2>
+                <p className="text-xs text-slate-400 mt-1">Nota: {exam.scorePercent}% · {exam.correctCount}/{exam.total} acertos · {exam.passed ? 'Aprovado' : 'Reprovado'}</p>
+              </div>
+              <button onClick={onClose} aria-label="Fechar revisão" className="p-2 text-slate-400 hover:text-white rounded-lg hover:bg-slate-700 transition"><Icons.X /></button>
+            </div>
+
+            <div className="overflow-y-auto custom-scrollbar p-4 sm:p-6 space-y-4">
+              {exam.questionReview.map(item => {
+                const userAnswers = item.userAnswer === null ? [] : Array.isArray(item.userAnswer) ? item.userAnswer : [item.userAnswer];
+                const correctAnswers = Array.isArray(item.correctAnswer) ? item.correctAnswer : [item.correctAnswer];
+                return (
+                  <article key={`${item.number}-${item.id}`} className={`p-4 rounded-xl border ${item.isCorrect ? 'bg-emerald-950/20 border-emerald-800/50' : 'bg-rose-950/20 border-rose-800/50'}`}>
+                    <div className="flex flex-wrap items-center justify-between gap-2 mb-3">
+                      <span className="text-xs font-bold text-slate-300">Questão {item.number} · {item.domain}</span>
+                      <div className="flex items-center gap-2">
+                        {item.flaggedForReview && <span className="text-xs font-bold text-amber-400 flex items-center gap-1"><Icons.Flag /> Marcada</span>}
+                        <span className={`text-xs font-bold ${item.isCorrect ? 'text-emerald-400' : 'text-rose-400'}`}>{item.isCorrect ? 'Acertou' : 'Errou'}</span>
+                      </div>
+                    </div>
+                    <h3 className="text-sm font-semibold text-white mb-3">{item.question}</h3>
+                    <div className="space-y-2">
+                      {item.options.map((option, optionIndex) => {
+                        const isSelected = userAnswers.includes(optionIndex);
+                        const isCorrectOption = correctAnswers.includes(optionIndex);
+                        const optionStyle = isCorrectOption
+                          ? 'bg-emerald-500/15 border-emerald-500/40 text-emerald-200'
+                          : isSelected
+                            ? 'bg-rose-500/15 border-rose-500/40 text-rose-200'
+                            : 'bg-slate-900/50 border-slate-700 text-slate-300';
+                        return (
+                          <div key={optionIndex} className={`flex items-start gap-2 p-2.5 rounded-lg border text-xs ${optionStyle}`}>
+                            <span className="font-bold shrink-0">{String.fromCharCode(65 + optionIndex)}.</span>
+                            <span>{option}</span>
+                            {isSelected && <span className="ml-auto shrink-0 font-bold">Sua resposta</span>}
+                          </div>
+                        );
+                      })}
+                    </div>
+                    {item.userAnswer === null && <p className="text-xs text-rose-300 mt-2">Questão não respondida.</p>}
+                    {item.explanation && <p className="text-xs text-slate-300 bg-slate-900/70 border border-slate-700 rounded-lg p-3 mt-3"><strong className="text-snGreen">Explicação:</strong> {item.explanation}</p>}
+                  </article>
+                );
+              })}
+            </div>
+
+            <div className="p-4 border-t border-slate-700 flex justify-end">
+              <button onClick={onClose} className="px-4 py-2 bg-slate-700 hover:bg-slate-600 text-white text-xs font-bold rounded-lg transition">Fechar revisão</button>
+            </div>
+          </div>
         </div>
       );
     }
@@ -983,6 +1213,76 @@ const FULL_250_QUESTIONS = window.FULL_250_QUESTIONS;
     function QuestionImporter({ questions, setQuestions, setModalConfig }) {
       const [jsonInput, setJsonInput] = useState('');
       const [message, setMessage] = useState(null);
+      const [searchTerm, setSearchTerm] = useState('');
+      const [editingId, setEditingId] = useState(null);
+      const [editDraft, setEditDraft] = useState(null);
+
+      const filteredQuestions = useMemo(() => {
+        const term = searchTerm.trim().toLowerCase();
+        if (!term) return questions;
+        return questions.filter(q =>
+          String(q.question || '').toLowerCase().includes(term) ||
+          String(q.domain || '').toLowerCase().includes(term)
+        );
+      }, [questions, searchTerm]);
+
+      const startEditing = (question) => {
+        setEditingId(question.id);
+        setEditDraft({
+          question: question.question || '',
+          domain: question.domain || '',
+          options: (question.options || []).join('\n'),
+          answer: (Array.isArray(question.answer) ? question.answer : [question.answer])
+            .map(index => String.fromCharCode(65 + index)).join(', '),
+          explanation: question.explanation || '',
+          hint: question.hint || ''
+        });
+        setMessage(null);
+      };
+
+      const saveQuestion = (questionId) => {
+        const options = editDraft.options.split('\n').map(option => option.trim()).filter(Boolean);
+        const answerLetters = editDraft.answer.toUpperCase().match(/[A-Z]/g) || [];
+        const answerIndexes = [...new Set(answerLetters.map(letter => letter.charCodeAt(0) - 65))];
+        if (!editDraft.question.trim() || options.length < 2 || !answerIndexes.length || answerIndexes.some(index => index >= options.length)) {
+          setMessage({ type: 'error', text: 'Informe o enunciado, pelo menos duas opções e respostas válidas (por exemplo: A ou A, C).' });
+          return;
+        }
+
+        const originalQuestion = questions.find(question => question.id === questionId);
+        const answer = answerIndexes.length > 1 || Array.isArray(originalQuestion?.answer) ? answerIndexes : answerIndexes[0];
+        setQuestions(prev => prev.map(question => question.id === questionId ? {
+          ...question,
+          question: editDraft.question.trim(),
+          domain: editDraft.domain.trim() || 'Geral',
+          options,
+          answer,
+          explanation: editDraft.explanation.trim(),
+          hint: editDraft.hint.trim()
+        } : question));
+        setEditingId(null);
+        setEditDraft(null);
+        setMessage({ type: 'success', text: 'Questão atualizada com sucesso.' });
+      };
+
+      const removeQuestion = (question) => {
+        setModalConfig({
+          isOpen: true,
+          title: 'Remover questão',
+          children: `Tem certeza que deseja remover a questão “${question.question}”? Esta ação não pode ser desfeita.`,
+          confirmText: 'Remover questão',
+          confirmBg: 'bg-companyRed hover:bg-companyRedHover text-white',
+          onConfirm: () => {
+            setQuestions(prev => prev.filter(item => item.id !== question.id));
+            if (editingId === question.id) {
+              setEditingId(null);
+              setEditDraft(null);
+            }
+            setModalConfig(null);
+            setMessage({ type: 'success', text: 'Questão removida do banco.' });
+          }
+        });
+      };
 
       const forceReload = () => {
         setQuestions(FULL_250_QUESTIONS);
@@ -1063,6 +1363,75 @@ const FULL_250_QUESTIONS = window.FULL_250_QUESTIONS;
               </button>
             </div>
           </div>
+
+          <section className="bg-slate-800 border border-slate-700 rounded-2xl p-6 shadow-xl space-y-4">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+              <div>
+                <h3 className="text-lg font-bold text-white">Consultar e Gerir Questões</h3>
+                <p className="text-slate-400 text-xs mt-1">{filteredQuestions.length} de {questions.length} questões</p>
+              </div>
+              <input
+                type="search"
+                placeholder="Pesquisar por palavra-chave ou domínio..."
+                value={searchTerm}
+                onChange={e => setSearchTerm(e.target.value)}
+                className="bg-slate-900 border border-slate-700 rounded-xl px-4 py-2.5 text-xs text-white focus:outline-none focus:border-snGreen w-full sm:w-80"
+              />
+            </div>
+
+            <div className="max-h-96 overflow-y-auto space-y-2 custom-scrollbar pr-2">
+              {filteredQuestions.length === 0 ? (
+                <p className="text-slate-400 text-sm py-6 text-center">Nenhuma questão encontrada.</p>
+              ) : filteredQuestions.slice(0, 50).map(q => (
+                <div key={q.id} className="p-3 bg-slate-900/60 rounded-lg border border-slate-700/60 space-y-3">
+                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs">
+                    <div className="space-y-1 min-w-0">
+                      <span className="text-snGreen font-bold">{q.domain || 'Geral'} · #{q.id}</span>
+                      <p className="text-slate-200 font-medium line-clamp-1">{q.question}</p>
+                    </div>
+                    <div className="flex shrink-0 gap-2">
+                      <button onClick={() => startEditing(q)} className="px-3 py-1.5 rounded-lg bg-slate-700 hover:bg-slate-600 text-white font-bold transition">Editar</button>
+                      <button onClick={() => removeQuestion(q)} className="px-3 py-1.5 rounded-lg bg-rose-500/15 hover:bg-rose-500/25 border border-rose-500/30 text-rose-300 font-bold transition">Remover</button>
+                    </div>
+                  </div>
+
+                  {editingId === q.id && editDraft && (
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-3 pt-3 border-t border-slate-700">
+                      <label className="text-xs text-slate-300 space-y-1 md:col-span-2">
+                        Enunciado
+                        <textarea rows={3} value={editDraft.question} onChange={e => setEditDraft(prev => ({ ...prev, question: e.target.value }))} className="w-full bg-slate-950 border border-slate-700 rounded-lg p-2.5 text-white focus:outline-none focus:border-snGreen" />
+                      </label>
+                      <label className="text-xs text-slate-300 space-y-1">
+                        Domínio
+                        <input value={editDraft.domain} onChange={e => setEditDraft(prev => ({ ...prev, domain: e.target.value }))} className="w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-white focus:outline-none focus:border-snGreen" />
+                      </label>
+                      <label className="text-xs text-slate-300 space-y-1">
+                        Respostas corretas (letras)
+                        <input value={editDraft.answer} onChange={e => setEditDraft(prev => ({ ...prev, answer: e.target.value }))} placeholder="A ou A, C" className="w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-white focus:outline-none focus:border-snGreen" />
+                      </label>
+                      <label className="text-xs text-slate-300 space-y-1 md:col-span-2">
+                        Opções (uma por linha; a primeira é A)
+                        <textarea rows={4} value={editDraft.options} onChange={e => setEditDraft(prev => ({ ...prev, options: e.target.value }))} className="w-full bg-slate-950 border border-slate-700 rounded-lg p-2.5 text-white focus:outline-none focus:border-snGreen" />
+                      </label>
+                      <label className="text-xs text-slate-300 space-y-1">
+                        Explicação
+                        <textarea rows={2} value={editDraft.explanation} onChange={e => setEditDraft(prev => ({ ...prev, explanation: e.target.value }))} className="w-full bg-slate-950 border border-slate-700 rounded-lg p-2.5 text-white focus:outline-none focus:border-snGreen" />
+                      </label>
+                      <label className="text-xs text-slate-300 space-y-1">
+                        Dica
+                        <textarea rows={2} value={editDraft.hint} onChange={e => setEditDraft(prev => ({ ...prev, hint: e.target.value }))} className="w-full bg-slate-950 border border-slate-700 rounded-lg p-2.5 text-white focus:outline-none focus:border-snGreen" />
+                      </label>
+                      <div className="md:col-span-2 flex justify-end gap-2">
+                        <button onClick={() => { setEditingId(null); setEditDraft(null); }} className="px-3 py-2 rounded-lg bg-slate-700 hover:bg-slate-600 text-slate-200 text-xs font-bold">Cancelar</button>
+                        <button onClick={() => saveQuestion(q.id)} className="px-3 py-2 rounded-lg bg-snGreen hover:bg-emerald-400 text-slate-950 text-xs font-bold">Salvar alterações</button>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              ))}
+              {filteredQuestions.length > 50 && <p className="text-center text-xs text-slate-500 py-2">Mostrando as primeiras 50 questões. Refine a pesquisa para encontrar outras.</p>}
+            </div>
+          </section>
         </div>
       );
     }
